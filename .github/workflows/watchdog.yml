@@ -1,0 +1,30 @@
+name: casdoor watchdog
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check health
+        id: check
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+            https://auth.jyrac.stki.org/api/health) || CODE="000"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger redeploy if unhealthy
+        if: steps.check.outputs.code == '503' || steps.check.outputs.code == '000'
+        run: |
+          echo "::error::casdoor returned HTTP ${{ steps.check.outputs.code }} — triggered redeploy, please check why it went down"
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/JYRAC/casdoor/actions/workflows/deploy-secrets.yml/dispatches" \
+            -d '{"ref":"main"}'
+          exit 1

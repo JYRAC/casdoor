@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: casdoor
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: GIN_MODE
+        value: release
+      - key: origin
+        value: "https://auth.jyrac.stki.org"
