@@ -1,3 +1,4 @@
+
 name: casdoor watchdog
 
 on:
@@ -22,11 +23,14 @@ jobs:
         if: steps.check.outputs.code == '503' || steps.check.outputs.code == '000'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_WORKFLOW: deploy-secrets.yml
         run: |
           CODE="${{ steps.check.outputs.code }}"
+          API="https://api.github.com/repos/JYRAC/casdoor/actions/workflows/${DEPLOY_WORKFLOW}"
+
           LAST=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/JYRAC/casdoor/actions/workflows/deploy-secrets.yml/runs?per_page=1" \
+            "${API}/runs?per_page=1" \
             | jq -r '.workflow_runs[0].created_at // empty')
 
           AGE=999999
@@ -39,10 +43,16 @@ jobs:
             exit 1
           fi
 
-          echo "::error::casdoor returned HTTP $CODE - triggered redeploy, please check why it went down"
-          curl -s -X POST \
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/JYRAC/casdoor/actions/workflows/deploy-secrets.yml/dispatches" \
-            -d '{"ref":"main"}'
+            "${API}/dispatches" \
+            -d '{"ref":"main"}') || STATUS="000"
+
+          if [ "$STATUS" != "204" ]; then
+            echo "::error::casdoor returned HTTP $CODE and the redeploy dispatch FAILED (HTTP $STATUS). Check the workflow file name (${DEPLOY_WORKFLOW})."
+            exit 1
+          fi
+
+          echo "::error::casdoor returned HTTP $CODE - triggered redeploy, please check why it went down"
           exit 1
