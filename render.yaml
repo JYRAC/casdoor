@@ -9,3 +9,5 @@ services:
         value: release
       - key: origin
         value: "https://auth.jyrac.stki.org"
+      - key: logConfig
+        value: "{"adapter":"console","level":7,"color":false}"
