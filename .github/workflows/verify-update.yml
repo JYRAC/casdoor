@@ -11,7 +11,7 @@ on:
       dry_run:
         description: "true = 検出と検査だけ(デプロイもマージもしない)"
         type: boolean
-        default: true
+        default: false
       pr:
         description: "PR番号(空なら最も古いRenovateのPR)"
         type: string
