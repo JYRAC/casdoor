@@ -1,0 +1,232 @@
+name: Verify and merge dependency update
+
+# Renovate が作った更新PRを、候補としてデプロイして検証する。
+#   合格 → PRをマージ(mainは常に「検証済み」だけになる)
+#   不合格 → mainのコミットで再デプロイして元に戻し、PRを閉じる
+# dry_run=true の間は、候補の検出と内容の検査だけを行い、何も変えない。
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = 検出と検査だけ(デプロイもマージもしない)"
+        type: boolean
+        default: true
+      pr:
+        description: "PR番号(空なら最も古いRenovateのPR)"
+        type: string
+        default: ""
+      simulate_failure:
+        description: "true = 候補のデプロイ後に検証を強制的に不合格にする(元に戻す流れの確認用)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: verify-update
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_CASDOOR_SERVICE_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PR_INPUT: ${{ inputs.pr }}
+          SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
+        run: |
+          set -euo pipefail
+          REPO=JYRAC/casdoor
+          PREV_REPO=directus        # 段階づけ: このリポジトリの1つ前(カナリア側)
+          MIN_AGE_HOURS=20        # 前段が同じ版になってから、この時間以上たつまで待つ
+          MAX_BACKUP_AGE_MIN=90   # 直前のバックアップとみなす新しさ(分)
+          API=https://api.github.com
+          SITE=https://auth.jyrac.stki.org/api/health
+          DRY_RUN="${DRY_RUN:-true}"
+          H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+
+          gh_api() { curl -sf "${H[@]}" "$@"; }
+          comment() {
+            gh_api -X POST "$API/repos/$REPO/issues/$PR/comments" \
+              -d "$(jq -n --arg b "$1" '{body:$b}')" >/dev/null || true
+          }
+
+          # --- 1. 候補のPRを集める(古い順) ---
+          if [ -n "${PR_INPUT:-}" ]; then
+            PRS="$PR_INPUT"
+          else
+            PRS=$(gh_api "$API/repos/$REPO/pulls?state=open&per_page=50&sort=created&direction=asc" \
+              | jq -r '.[] | select(.user.login=="renovate[bot]" and (.head.ref|startswith("renovate/"))) | .number')
+          fi
+          if [ -z "$PRS" ]; then echo "no candidate PR"; exit 0; fi
+
+          # --- 2. 候補を古い順に調べて、進めてよい最初の1件を選ぶ(待ち・不適合の候補は飛ばして次へ) ---
+          ERRS=0
+          check_candidate() { # PR番号 -> 0: 進める / 1: 飛ばす
+            local n="$1" PRJ AUTHOR HEADREPO BAD NEWVER PREV_VER PREV_DATE AGE_H BEHIND BK BK_DATE BK_AGE_MIN
+            PRJ=$(gh_api "$API/repos/$REPO/pulls/$n") || { echo "::error::cannot read PR #$n"; ERRS=$((ERRS+1)); return 1; }
+            AUTHOR=$(jq -r .user.login <<<"$PRJ")
+            HEAD=$(jq -r .head.sha <<<"$PRJ")
+            HEADREPO=$(jq -r .head.repo.full_name <<<"$PRJ")
+            TITLE=$(jq -r .title <<<"$PRJ")
+            echo "candidate: #$n $TITLE ($HEAD)"
+            echo "- candidate #$n: $TITLE" >> "$GITHUB_STEP_SUMMARY"
+
+            # 安全確認: Renovate本人の、同一リポジトリのブランチで、Dockerfileの FROM / ARG BAO_VERSION 行だけの変更
+            if [ "$AUTHOR" != "renovate[bot]" ] || [ "$HEADREPO" != "$REPO" ]; then
+              echo "::error::PR #$n is not from renovate[bot] in this repo; refusing"; ERRS=$((ERRS+1)); return 1
+            fi
+            FILES=$(gh_api "$API/repos/$REPO/pulls/$n/files?per_page=100") || FILES="[]"
+            if [ "$(jq 'length' <<<"$FILES")" != "1" ] || [ "$(jq -r '.[0].filename' <<<"$FILES")" != "Dockerfile" ]; then
+              echo "::error::PR #$n changes files other than Dockerfile; refusing"; ERRS=$((ERRS+1)); return 1
+            fi
+            BAD=$(jq -r '.[0].patch // ""' <<<"$FILES" \
+              | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+              | grep -vE '^[+-](FROM |ARG BAO_VERSION=)' || true)
+            if [ -n "$BAD" ]; then
+              echo "::error::PR #$n changes lines other than FROM / ARG BAO_VERSION; refusing"; ERRS=$((ERRS+1)); return 1
+            fi
+
+            # mainに追いついているか(古い土台のままデプロイしない。追いついていなければ、Renovateのrebaseを待つ)
+            BEHIND=$(gh_api "$API/repos/$REPO/compare/main...$HEAD" | jq -r '.behind_by // empty') || BEHIND=""
+            if [ "$BEHIND" != "0" ]; then
+              echo "waiting: PR #$n is ${BEHIND:-?} commit(s) behind main; waiting for Renovate to rebase"
+              echo "- #$n waiting: behind main by ${BEHIND:-?}" >> "$GITHUB_STEP_SUMMARY"; return 1
+            fi
+
+            # 段階づけ(BAO_VERSIONの更新だけ): 前段のリポジトリが同じ版で十分な時間動いているときだけ進む
+            NEWVER=$(jq -r '.[0].patch' <<<"$FILES" | grep -E '^\+ARG BAO_VERSION=' | head -1 | sed 's/^+ARG BAO_VERSION=//') || true
+            if [ -n "$NEWVER" ]; then
+              PREV_VER=$(gh_api "$API/repos/JYRAC/$PREV_REPO/contents/Dockerfile?ref=main" \
+                | jq -r .content | base64 -d | grep -E '^ARG BAO_VERSION=' | head -1 | sed 's/^ARG BAO_VERSION=//') || true
+              PREV_DATE=$(gh_api "$API/repos/JYRAC/$PREV_REPO/commits?path=Dockerfile&per_page=1" \
+                | jq -r '.[0].commit.committer.date // empty') || PREV_DATE=""
+              if [ -z "$PREV_DATE" ]; then
+                echo "waiting: cannot read the history of $PREV_REPO"; return 1
+              fi
+              AGE_H=$(( ( $(date +%s) - $(date -d "$PREV_DATE" +%s) ) / 3600 ))
+              echo "gate: $PREV_REPO is on ${PREV_VER:-unknown} (Dockerfile last changed ${AGE_H}h ago); candidate wants $NEWVER"
+              echo "- #$n gate: $PREV_REPO=${PREV_VER:-unknown}, age=${AGE_H}h, candidate=$NEWVER" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$PREV_VER" != "$NEWVER" ]; then
+                echo "waiting: $PREV_REPO is not on $NEWVER yet"; return 1
+              fi
+              if [ "$AGE_H" -lt "$MIN_AGE_HOURS" ]; then
+                echo "waiting: $PREV_REPO changed only ${AGE_H}h ago (< ${MIN_AGE_HOURS}h)"; return 1
+              fi
+            else
+              echo "gate: FROM update (not gated by the chain)"
+            fi
+
+            # 直前のバックアップの確認(DBを持つアプリの更新は、直前のバックアップが前提)
+            BK=$(gh_api "$API/repos/JYRAC/backup/commits?path=dumps&per_page=1" | jq -c '.[0] // empty') || BK=""
+            BK_SHA=$(jq -r '.sha // empty' <<<"$BK" 2>/dev/null || true)
+            BK_DATE=$(jq -r '.commit.committer.date // empty' <<<"$BK" 2>/dev/null || true)
+            if [ -z "$BK_DATE" ]; then BK_AGE_MIN=999999
+            else BK_AGE_MIN=$(( ( $(date +%s) - $(date -d "$BK_DATE" +%s) ) / 60 )); fi
+            echo "backup: latest ${BK_SHA:0:7} (${BK_AGE_MIN} min ago)"
+            echo "- #$n backup: ${BK_SHA:0:7}, ${BK_AGE_MIN} min ago" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$BK_AGE_MIN" -gt "$MAX_BACKUP_AGE_MIN" ]; then
+              echo "::warning::latest backup is ${BK_AGE_MIN} min old (> ${MAX_BACKUP_AGE_MIN} min); skipping the update"
+              return 1
+            fi
+            return 0
+          }
+
+          PR=""
+          for CAND in $PRS; do
+            PR="$CAND"
+            if check_candidate "$CAND"; then break; fi
+            PR=""
+          done
+          if [ -z "$PR" ]; then
+            echo "no PR is ready this run"
+            if [ "$ERRS" -gt 0 ]; then exit 1; fi
+            exit 0
+          fi
+          echo "selected: #$PR $TITLE"
+          {
+            echo "### Selected candidate"
+            echo "- PR #$PR: $TITLE"
+            echo "- commit: \`$HEAD\`"
+            echo '```diff'
+            jq -r '.[0].patch' <<<"$FILES"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run: checks passed, nothing deployed or merged"; exit 0
+          fi
+
+          # --- 3. 候補をデプロイして検証 ---
+          BASE=$(gh_api "$API/repos/$REPO/commits/main" | jq -r .sha)
+
+          deploy_commit() { # sha
+            gh_api -X POST "$API/repos/$REPO/actions/workflows/deploy-secrets.yml/dispatches" \
+              -d "$(jq -n --arg c "$1" '{ref:"main",inputs:{commit:$c,wrap_ttl:"600s"}}')"
+          }
+
+          wait_live() { # sha t0 -> 0: live / 1: failed or timeout (10分)
+            local sha="$1" t0="$2" end=$(( $(date +%s) + 600 )) st=""
+            while [ "$(date +%s)" -lt "$end" ]; do
+              sleep 20
+              st=$(curl -sf -H "Authorization: Bearer $RENDER_API_KEY" \
+                "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=10" \
+                | jq -r --arg c "$sha" --arg t "$t0" \
+                  '[.[] | (.deploy // .) | select(.commit.id==$c and .createdAt>=$t)] | sort_by(.createdAt) | last | .status // empty') || st=""
+              echo "deploy status: ${st:-pending}"
+              case "$st" in
+                live) return 0 ;;
+                build_failed|update_failed|canceled|pre_deploy_failed|deactivated) return 1 ;;
+              esac
+            done
+            return 1
+          }
+
+          healthy() { # 30秒おきに最大8回、4回連続で HTTP 200 なら合格(最大4分)
+            local ok=0 i code
+            for i in 1 2 3 4 5 6 7 8; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$SITE") || code=000
+              if [ "$code" = "200" ]; then ok=$((ok+1)); else ok=0; fi
+              echo "health: HTTP $code (consecutive ok: $ok)"
+              if [ "$ok" -ge 4 ]; then return 0; fi
+              sleep 30
+            done
+            return 1
+          }
+
+          T0=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          deploy_commit "$HEAD"
+          SIM="${SIMULATE_FAILURE:-false}"
+          if wait_live "$HEAD" "$T0" && healthy && [ "$SIM" != "true" ]; then
+            gh_api -X PUT "$API/repos/$REPO/pulls/$PR/merge" -d '{"merge_method":"squash"}' >/dev/null
+            comment "検証に合格したのでマージしました。デプロイしたコミット: $HEAD(更新直前のバックアップ: ${BK_SHA:0:7})"
+            echo "update merged"; exit 0
+          fi
+
+          # --- 4. 不合格: mainのコミットで元に戻す ---
+          echo "::warning::candidate failed; rolling back to $BASE"
+          T1=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          deploy_commit "$BASE"
+          if [ "$SIM" = "true" ]; then NOTE="(simulate_failure による確認用の不合格です)"; else NOTE=""; fi
+          if wait_live "$BASE" "$T1"; then
+            RB="戻しのデプロイが完了し、応答も正常です。"
+            if ! healthy; then
+              RB="戻しのデプロイは完了しましたが、応答が正常ではありません。マイグレーションのあとで旧版が起動できない可能性があります。バックアップ(${BK_SHA:0:7})からの復旧を検討してください。"
+              echo "::error::rolled back, but the service is not healthy - consider restoring from backup"
+            fi
+          else
+            RB="戻しのデプロイが完了しませんでした。Renderを確認し、必要ならバックアップ(${BK_SHA:0:7})から復旧してください。"
+            echo "::error::rollback deploy did not become live - check Render"
+          fi
+          comment "検証に失敗したため、main($BASE)に戻してこのPRを閉じました。$NOTE $RB"
+          gh_api -X PATCH "$API/repos/$REPO/pulls/$PR" -d '{"state":"closed"}' >/dev/null || true
+          echo "::error::update '$TITLE' failed and was rolled back"
+          exit 1

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "enabledManagers": [
+    "dockerfile",
+    "custom.regex"
+  ],
+  "dependencyDashboard": false,
+  "timezone": "Asia/Tokyo",
+  "minimumReleaseAge": "2 days",
+  "internalChecksFilter": "strict",
+  "prConcurrentLimit": 4,
+  "automerge": false,
+  "labels": [
+    "renovate"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG BAO_VERSION=(?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "openbao/openbao",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "matchDepNames": [
+        "openbao/openbao"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "minimumReleaseAge": "1 day"
+    },
+    {
+      "matchDepNames": [
+        "casbin/casdoor"
+      ],
+      "minimumReleaseAge": "3 days",
+      "schedule": [
+        "before 5am on monday"
+      ]
+    }
+  ],
+  "rebaseWhen": "behind-base-branch"
+}
