@@ -1,4 +1,4 @@
-FROM casbin/casdoor:4.11.0
+FROM casbin/casdoor:v4.26.0
 COPY conf/app.conf /conf/app.conf
 
 ARG BAO_VERSION=2.7.2
