@@ -9,5 +9,13 @@ services:
         value: release
       - key: origin
         value: "https://auth.jyrac.stki.org"
+      # JSON は、シングルクォートで囲む（ダブルクォートの中にダブルクォートを入れると、YAML として壊れる）
       - key: logConfig
-        value: "{"adapter":"console","level":7,"color":false}"
+        value: '{"adapter":"console","level":7,"color":false}'
+      # ---- NetBird（OpenBao へ、NetBird 経由で接続し、固定のピアに切り替える）----
+      # NB_SETUP_KEY（仮のピアの、使い捨てキー）は、deploy-secrets.yml が、デプロイのたびに作って渡すので、ここには書かない。
+      # 固定のピアの設定（netbird_config_b64）は、OpenBao の kv/secrets/casdoor/config から受け取る。
+      - key: NB_HOSTNAME
+        value: "casdoor"
+      - key: OPENBAO_NB_ADDR
+        value: "https://100.125.124.43:8210"
