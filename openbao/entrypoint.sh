@@ -102,6 +102,32 @@ if [ "$NB_OK" = 1 ]; then
   unset NB_CFG
 fi
 
+# 切り替えの直後は、SOCKS5（127.0.0.1:1080）や、OpenBao への経路が、まだ使えないことがある。
+# Agent は、認証に失敗すると、待ち時間が倍々に増えて（数分）、起動が進まなくなるので、
+# NetBird 経由で届くことを確認してから、Agent を起動する（最大で、約 3 分待つ）。
+# 届かないときは、診断をログに出して、公開側の OpenBao で、Agent を起動する（移行中の、一時的な代替）。
+if [ "$VIA" = "netbird" ]; then
+  i=0
+  REACH=0
+  while [ "$i" -lt 20 ]; do
+    if BAO_TOKEN="$REAL_TOKEN" BAO_CLIENT_TIMEOUT=8s bao token lookup >/dev/null 2>/tmp/reach.err; then
+      REACH=1
+      break
+    fi
+    i=$((i + 1))
+    sleep 3
+  done
+  if [ "$REACH" = 1 ]; then
+    echo "NB: NetBird 経由で OpenBao に届きました（確認 $((i + 1)) 回目）"
+  else
+    echo "NB: 約 3 分待っても、NetBird 経由で OpenBao に届きません: $(tail -n 2 /tmp/reach.err | tr '\n' ' ')" >&2
+    NB_DAEMON_ADDR=unix:///tmp/nb/netbird.sock netbird status 2>&1 | head -n 15 | sed 's/^/NB:   /' >&2 || true
+    tail -n 8 /tmp/nb/service.log 2>/dev/null | sed 's/^/NB:   /' >&2 || true
+    echo "NB: 公開側の OpenBao で、Agent を起動します（移行中の、一時的な代替）" >&2
+    use_public
+  fi
+fi
+
 unset REAL_TOKEN OPENBAO_WRAPPED_TOKEN
 
 # Agent の接続設定（vault ブロック）は、経路によって変わるので、ここで作って、agent.hcl の前に付ける。
