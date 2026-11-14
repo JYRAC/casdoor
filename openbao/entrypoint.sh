@@ -89,20 +89,45 @@ else
   echo "OpenBao から tls_cert_pem / tls_key_pem を受け取れません。内部口は開きません: $(tail -n 2 /tmp/tls.err | tr '\n' ' ')" >&2
 fi
 
-# 固定のピアの設定を、OpenBao から受け取って、一時のピアから切り替える（unwrap と同じ経路を使う）。
-# 受け取れない、または、切り替えに失敗したときは、一時のピアのまま続ける（OpenBao には出られるが、
-# Casdoor は NetBird に出ない。C1 の段階では、利用者にも、他のアプリにも、影響しない）。
+# 固定のピアの設定を、OpenBao から受け取る。切り替えは、公開口が開いてから、背景で行う。
+#
+# 理由: 固定のピアは、毎回のデプロイで、同じ身元（鍵）を使う。Render は、新しいインスタンスが「起動した」と
+# 見るまで、古いインスタンスを止めないので、起動中の新しいインスタンスと、古いインスタンスが、同じ身元で、
+# 同時に NetBird につながる。すると、接続が奪い合いになって、新しい側の通信が、断続的に止まる、と考えている
+# （実際に、切り替えの後、OpenBao に届くまで 1 分、Agent の認証が数分、止まった）。そこで、起動の間は、デプロイごとに
+# 身元が違う、一時のピアのまま進めて、公開口が開いて、古いインスタンスが止まる頃に、固定のピアに切り替える。
+# （一時のピアで、OpenBao に出る間は、Casdoor は、まだ NetBird に出ない。内部口には、切り替えの後から届く）
+#
+#   NB_SWAP_WAIT_SEC   公開口が開くのを待つ、最大の秒数（既定 900）。開かなければ、切り替えない
+#   NB_SWAP_DELAY_SEC  公開口が開いてから、切り替えるまでの、待ち秒数（既定 45。古いインスタンスが止まるのを待つ）
 if [ "$NB_OK" = 1 ]; then
   NB_CFG=$(BAO_TOKEN="$REAL_TOKEN" bao kv get -mount=kv -field=netbird_config_b64 secrets/casdoor/config 2>/tmp/nbcfg.err) || NB_CFG=""
   if [ -n "$NB_CFG" ]; then
-    NB_CONFIG_B64="$NB_CFG" /netbird-swap.sh || echo "NB: 固定のピアに切り替えられませんでした。Casdoor は NetBird に出ません" >&2
+    (
+      i=0
+      OPENED=0
+      while [ "$i" -lt "${NB_SWAP_WAIT_SEC:-900}" ]; do
+        if curl --noproxy '*' -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${PORT:-8000}/gate/healthz" 2>/dev/null; then
+          OPENED=1
+          break
+        fi
+        i=$((i + 5))
+        sleep 5
+      done
+      if [ "$OPENED" = 1 ]; then
+        echo "NB: 公開口が開きました。${NB_SWAP_DELAY_SEC:-45} 秒後に、固定のピアに切り替えます"
+        sleep "${NB_SWAP_DELAY_SEC:-45}"
+        NB_CONFIG_B64="$NB_CFG" /netbird-swap.sh || echo "NB: 固定のピアに切り替えられませんでした。Casdoor は NetBird に出ません" >&2
+      else
+        echo "NB: 公開口が開かなかったため、固定のピアには切り替えません" >&2
+      fi
+    ) &
   else
     echo "NB: OpenBao から netbird_config_b64 を受け取れませんでした。Casdoor は NetBird に出ません: $(tail -n 2 /tmp/nbcfg.err | tr '\n' ' ')" >&2
   fi
   unset NB_CFG
 fi
 
-# 切り替えの直後は、SOCKS5（127.0.0.1:1080）や、OpenBao への経路が、まだ使えないことがある。
 # Agent は、認証に失敗すると、待ち時間が倍々に増えて（数分）、起動が進まなくなるので、
 # NetBird 経由で届くことを確認してから、Agent を起動する（最大で、約 3 分待つ）。
 # 届かないときは、診断をログに出して、公開側の OpenBao で、Agent を起動する（移行中の、一時的な代替）。
