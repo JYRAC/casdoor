@@ -238,6 +238,11 @@ func (h *healthChecker) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// 内部口の証明書の期限（watchdog が、残り日数を見て、再デプロイを起動する。秘密ではない）
+	if ci := internalCertInfo.Load(); ci != nil {
+		w.Header().Set("X-Gate-Internal-Cert-Expires", ci.notAfter.UTC().Format(time.RFC3339))
+		w.Header().Set("X-Gate-Internal-Cert-Source", ci.source)
+	}
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodGet {
 		_, _ = w.Write([]byte("ok"))

@@ -49,7 +49,7 @@ jobs:
           MIN_AGE_HOURS=20        # 前段が同じ版になってから、この時間以上たつまで待つ
           MAX_BACKUP_AGE_MIN=90   # 直前のバックアップとみなす新しさ(分)
           API=https://api.github.com
-          SITE=https://auth.jyrac.stki.org/api/health
+          SITE=https://auth.jyrac.stki.org/gate/healthz   # IP 制限の対象外（ゲートが、自分で応答する）
           DRY_RUN="${DRY_RUN:-true}"
           H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
 

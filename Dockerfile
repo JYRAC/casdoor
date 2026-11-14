@@ -60,6 +60,7 @@ ENV GATE_CHILD_CMD='["/server"]' \
 # OpenBao の NetBird 向け証明書（公開情報）
 COPY openbao/ca.crt /etc/openbao/ca.crt
 COPY openbao/agent.hcl /etc/openbao/agent.hcl
+COPY openbao/cert-once.hcl /etc/openbao/cert-once.hcl
 COPY openbao/entrypoint.sh /entrypoint.sh
 COPY openbao/netbird-up.sh /netbird-up.sh
 COPY openbao/netbird-swap.sh /netbird-swap.sh

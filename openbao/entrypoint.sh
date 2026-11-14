@@ -77,7 +77,8 @@ fi
 printf '%s' "$REAL_TOKEN" > /tmp/vault-token
 
 # 内部口（NetBird 向け、TLS 1.3）の、証明書と秘密鍵（OpenBao から受け取る。unwrap と同じ経路を使う）。
-# 受け取れないときは、内部口だけが開かない（ゲートが、ログに GATE_INTERNAL_DISABLED を出す）。
+# 受け取れないときは、PKI の証明書（下）が使えなければ、内部口だけが開かない（ゲートが、ログに GATE_INTERNAL_DISABLED を出す）。
+# ここで受け取るものは、PKI が使えないときの、戻り先になる。
 # 公開側の Casdoor は、そのまま動く。
 mkdir -p /tmp/tls
 BAO_TOKEN="$REAL_TOKEN" bao kv get -mount=kv -field=tls_cert_pem secrets/casdoor/config > /tmp/tls/cert.pem 2>/tmp/tls.err || true
@@ -86,7 +87,7 @@ if [ -s /tmp/tls/cert.pem ] && [ -s /tmp/tls/key.pem ]; then
   chmod 600 /tmp/tls/key.pem
 else
   rm -f /tmp/tls/cert.pem /tmp/tls/key.pem
-  echo "OpenBao から tls_cert_pem / tls_key_pem を受け取れません。内部口は開きません: $(tail -n 2 /tmp/tls.err | tr '\n' ' ')" >&2
+  echo "OpenBao の KV から tls_cert_pem / tls_key_pem を受け取れません（PKI からも発行できなければ、内部口は開きません）: $(tail -n 2 /tmp/tls.err | tr '\n' ' ')" >&2
 fi
 
 # 固定のピアの設定を、OpenBao から受け取る。切り替えは、公開口が開いてから、背景で行う。
@@ -153,9 +154,8 @@ if [ "$VIA" = "netbird" ]; then
   fi
 fi
 
-unset REAL_TOKEN OPENBAO_WRAPPED_TOKEN
-
-# Agent の接続設定（vault ブロック）は、経路によって変わるので、ここで作って、agent.hcl の前に付ける。
+# Agent の接続設定（vault ブロック）は、経路によって変わるので、ここで作る（経路は、この時点で確定）。
+# 常駐の Agent と、証明書の 1 回発行の Agent の、両方で、同じものを、設定の前に付ける。
 {
   echo 'vault {'
   echo "  address = \"$BAO_ADDR\""
@@ -165,8 +165,40 @@ unset REAL_TOKEN OPENBAO_WRAPPED_TOKEN
   fi
   echo '}'
   echo
-  cat /etc/openbao/agent.hcl
-} > /tmp/agent.hcl
+} > /tmp/vault.hcl
+
+# 内部口の証明書を、OpenBao の PKI（pki_int の casdoor ロール）から、起動時に 1 回だけ発行する。
+# 成功したときだけ、ゲートに、その組を使わせる（GATE_INTERNAL_CERT / KEY）。失敗したときは、上で受け取った
+# KV の自己署名が、そのまま使われる（ゲートの既定。期限切れや、鍵の不一致のときも、ゲートが、そちらに戻る）。
+# 常駐の Agent のテンプレートには、入れない（失敗すると、Agent が終了せずに、リトライを続けて、子プロセス
+# （ゲート）が起動しないため）。必ず timeout をかけ、成否は、2 つのファイルが両方あるかで判断する。
+# PKI が、まだ無い（P1 の前）ときは、最大 60 秒待ってから、KV に戻る。
+TLS_SOURCE=none
+if [ -s /tmp/tls/cert.pem ] && [ -s /tmp/tls/key.pem ]; then
+  TLS_SOURCE=kv-fallback
+fi
+rm -rf /tmp/tls/pki
+mkdir -p /tmp/tls/pki
+{ cat /tmp/vault.hcl; cat /etc/openbao/cert-once.hcl; } > /tmp/cert-once.hcl
+if command -v timeout >/dev/null 2>&1; then
+  timeout 60 bao agent -config=/tmp/cert-once.hcl -exit-after-auth > /tmp/cert-once.log 2>&1 || true
+else
+  echo "timeout コマンドがありません" > /tmp/cert-once.log
+fi
+if [ -s /tmp/tls/pki/bundle.pem ] && [ -s /tmp/tls/pki/key.pem ]; then
+  chmod 600 /tmp/tls/pki/key.pem /tmp/tls/pki/bundle.pem
+  export GATE_INTERNAL_CERT=/tmp/tls/pki/bundle.pem GATE_INTERNAL_KEY=/tmp/tls/pki/key.pem
+  TLS_SOURCE=pki
+else
+  rm -rf /tmp/tls/pki
+  echo "TLS: PKI から証明書を発行できませんでした（KV の自己署名に戻ります）: $(tail -n 3 /tmp/cert-once.log | tr '\n' ' ')" >&2
+fi
+rm -f /tmp/cert-once.hcl /tmp/cert-once.log
+echo "TLS_CERT_SOURCE=$TLS_SOURCE"
+
+unset REAL_TOKEN OPENBAO_WRAPPED_TOKEN
+
+cat /tmp/vault.hcl /etc/openbao/agent.hcl > /tmp/agent.hcl
 
 echo "OPENBAO_VIA=$VIA addr=$BAO_ADDR"
 exec bao agent -config=/tmp/agent.hcl

@@ -14,19 +14,50 @@ jobs:
     steps:
       - name: Check health
         id: check
+        env:
+          RENEW_DAYS: "30"   # 内部口の証明書が、この日数を切ったら、再デプロイして、新しく発行させる
         run: |
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-            https://auth.jyrac.stki.org/api/health) || CODE="000"
+          # ゲートが、自分で応答する /gate/healthz を見る（IP 制限の対象外。enforce でも、同じ GitHub のランナーから通る）。
+          # 200 のとき、内部口の証明書の期限が、X-Gate-Internal-Cert-Expires に入る（内部口が有効なときだけ）。
+          HDR="$RUNNER_TEMP/healthz.headers"
+          CODE=$(curl -s -o /dev/null -D "$HDR" -w "%{http_code}" --max-time 10 \
+            https://auth.jyrac.stki.org/gate/healthz) || CODE="000"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger redeploy if unhealthy
-        if: steps.check.outputs.code == '503' || steps.check.outputs.code == '000'
+          EXP=""; SRC=""; DAYS=""; RENEW="false"
+          if [ "$CODE" = "200" ] && [ -f "$HDR" ]; then
+            EXP=$(grep -i '^x-gate-internal-cert-expires:' "$HDR" | tr -d '\r' | awk '{print $2}' | head -n 1)
+            SRC=$(grep -i '^x-gate-internal-cert-source:' "$HDR" | tr -d '\r' | awk '{print $2}' | head -n 1)
+          fi
+          if [ -n "$EXP" ] && EXP_S=$(date -d "$EXP" +%s 2>/dev/null); then
+            DAYS=$(( (EXP_S - $(date +%s)) / 86400 ))
+            echo "internal cert: expires=$EXP source=${SRC:-unknown} days_left=$DAYS"
+            if [ "$DAYS" -lt "$RENEW_DAYS" ]; then RENEW="true"; fi
+          fi
+          echo "renew=$RENEW" >> "$GITHUB_OUTPUT"
+          echo "days=$DAYS" >> "$GITHUB_OUTPUT"
+          echo "source=${SRC:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger redeploy if unhealthy or the internal cert is expiring
+        if: steps.check.outputs.code == '503' || steps.check.outputs.code == '000' || steps.check.outputs.renew == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_WORKFLOW: deploy-secrets.yml
         run: |
           CODE="${{ steps.check.outputs.code }}"
+          RENEW="${{ steps.check.outputs.renew }}"
+          DAYS="${{ steps.check.outputs.days }}"
+          SRC="${{ steps.check.outputs.source }}"
           API="https://api.github.com/repos/JYRAC/casdoor/actions/workflows/${DEPLOY_WORKFLOW}"
+
+          # 落ちているとき: 900 秒以内に、デプロイしていたら、起動しない（デプロイの連発を避ける）。
+          # 証明書の更新だけのとき: 1 日以内に、デプロイしていたら、起動しない
+          # （新しく発行しても、期限が延びない場合に、毎分のデプロイにならないように）。
+          if [ "$CODE" = "503" ] || [ "$CODE" = "000" ]; then
+            MIN_AGE=900
+          else
+            MIN_AGE=86400
+          fi
 
           LAST=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -38,9 +69,13 @@ jobs:
             AGE=$(( $(date +%s) - $(date -d "$LAST" +%s) ))
           fi
 
-          if [ "$AGE" -lt 900 ]; then
-            echo "::error::casdoor returned HTTP $CODE, but the last deploy ran ${AGE}s ago (<900s). Skipping redeploy to avoid a deploy storm."
-            exit 1
+          if [ "$AGE" -lt "$MIN_AGE" ]; then
+            if [ "$MIN_AGE" = "900" ]; then
+              echo "::error::casdoor returned HTTP $CODE, but the last deploy ran ${AGE}s ago (<900s). Skipping redeploy to avoid a deploy storm."
+              exit 1
+            fi
+            echo "::warning::internal cert has ${DAYS} days left (source=${SRC}), but the last deploy ran ${AGE}s ago (<${MIN_AGE}s). Skipping redeploy."
+            exit 0
           fi
 
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
@@ -50,9 +85,16 @@ jobs:
             -d '{"ref":"main"}') || STATUS="000"
 
           if [ "$STATUS" != "204" ]; then
-            echo "::error::casdoor returned HTTP $CODE and the redeploy dispatch FAILED (HTTP $STATUS). Check the workflow file name (${DEPLOY_WORKFLOW})."
+            echo "::error::redeploy dispatch FAILED (HTTP $STATUS). Check the workflow file name (${DEPLOY_WORKFLOW})."
             exit 1
           fi
 
-          echo "::error::casdoor returned HTTP $CODE - triggered redeploy, please check why it went down"
-          exit 1
+          if [ "$CODE" = "503" ] || [ "$CODE" = "000" ]; then
+            echo "::error::casdoor returned HTTP $CODE - triggered redeploy, please check why it went down"
+            exit 1
+          fi
+          # 新しく発行しても、期限が延びない（出どころが pki 以外。PKI から発行できていない）ときは、気づけるようにする
+          if [ "$SRC" != "pki" ]; then
+            echo "::warning::internal cert has ${DAYS} days left and source=${SRC}: a redeploy will not extend it unless PKI issuance works (check TLS_CERT_SOURCE in the logs)."
+          fi
+          echo "::notice::internal cert has ${DAYS} days left (source=${SRC}) - triggered redeploy to renew it"
