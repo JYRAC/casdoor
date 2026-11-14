@@ -7,6 +7,10 @@ services:
     envVars:
       - key: GIN_MODE
         value: release
+      # ゲートの公開ポート。以前の検出（8000）と同じにしておく（変えると、Render がデプロイを再起動して、
+      # 使用済みのラップトークンで、起動に失敗する）
+      - key: PORT
+        value: "8000"
       - key: origin
         value: "https://auth.jyrac.stki.org"
       # JSON は、シングルクォートで囲む（ダブルクォートの中にダブルクォートを入れると、YAML として壊れる）

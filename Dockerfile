@@ -43,7 +43,9 @@ RUN chmod +x /usr/local/bin/netbird /app/gate && /usr/local/bin/netbird version
 
 # ゲートが起動するアプリ（Casdoor）。秘密ではないので、コードと一緒に版管理する。
 #   Casdoor は、ゲートの内側（127.0.0.1:3457。conf/app.conf の httpaddr と httpport）だけで待ち受ける。
-#   公開ポート（$PORT）はゲートが受ける。
+#   公開ポート（$PORT）はゲートが受ける。$PORT は 8000 に固定する（Render の環境変数 PORT=8000）。
+#   Render は、公開ポートを、初回の検出で記録していて、変わると「ポートが変わった」と判断して、デプロイを
+#   再起動する。再起動では、使用済みのラップトークンと NetBird のキーで、起動に失敗する。
 #   GATE_WAIT_READY_SEC: Casdoor が応答するまで、ゲートは公開ポートを開かない（Render が、準備前に切り替えない）。
 #   内部口 A（OIDC のサーバー側の通信）と B（管理 API）は、NetBird の転送が届く 127.0.0.1 で、TLS 1.3 で待ち受ける。
 #   証明書と鍵は、OpenBao の kv/secrets/casdoor/config（tls_cert_pem、tls_key_pem）から、entrypoint.sh が /tmp/tls/ に置く。
@@ -65,5 +67,5 @@ COPY openbao/netbird-register.sh /netbird-register.sh
 RUN sed -i 's/\r$//' /entrypoint.sh /netbird-up.sh /netbird-swap.sh /netbird-register.sh && \
     chmod +x /entrypoint.sh /netbird-up.sh /netbird-swap.sh /netbird-register.sh
 
-EXPOSE 10000
+EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
