@@ -23,6 +23,12 @@ env_template "GATE_DB_PASSWORD" {
   contents = "{{ with secret \"database/creds/gate-reader\" }}{{ .Data.password }}{{ end }}"
 }
 
+# Worker（pr.jyrac.stki.org）の、署名つき例外の秘密（signed.go）。Casdoor の client_secret とは、別の値。
+# キーが無いときは "<no value>" になるが、短いので、ゲートは、例外を無効にして起動する。
+env_template "GATE_SIGNED_SECRET" {
+  contents = "{{ with secret \"kv/data/secrets/casdoor/config\" }}{{ index .Data.data \"gate_signed_secret\" }}{{ end }}"
+}
+
 # Casdoor 本体（/server）は、ゲートが起動する（Dockerfile の GATE_CHILD_CMD）。
 # ゲートは、`env -u` を通して起動する。Agent が OpenBao に出るための設定（SOCKS5 のプロキシ、
 # OpenBao 向けの BAO_*）を、ゲートと Casdoor に渡さないため。渡すと、Casdoor の外向きの通信

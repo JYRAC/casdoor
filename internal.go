@@ -74,6 +74,7 @@ func newInternalProxy(target *url.URL, host string) *httputil.ReverseProxy {
 			for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "CF-Connecting-IP"} {
 				pr.Out.Header.Del(h)
 			}
+			stripSignedHeaders(pr.Out.Header)
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

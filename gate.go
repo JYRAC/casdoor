@@ -23,6 +23,7 @@ package main
 //   GATE_DENIED_URL             既定 https://gate.jyrac.stki.org/denied（?ip=<IP> を付けて飛ばす）
 //   GATE_LOG_ALLOWED            1 のとき、許可したリクエストも記録する（観察用）
 //   GATE_INTERNAL_*             内部口（A、B）。internal.go
+//   GATE_SIGNED_SECRET          Worker 用の、署名つき例外の秘密（32 文字以上。空なら無効）。signed.go
 //   GATE_DB_HOST / GATE_DB_PORT(6543) / GATE_DB_NAME(postgres) / GATE_DB_USER / GATE_DB_PASSWORD
 //   GATE_DB_SSLMODE(require) / GATE_DB_SSLROOTCERT
 //
@@ -289,6 +290,7 @@ type Gate struct {
 	healthPath  string
 	exactAllow  map[string]bool
 	publicRules []publicRule
+	signer      *Signer
 	redirectURL string
 	deniedURL   string
 	enforce     bool
@@ -312,6 +314,8 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			d = Decision{Allowed: true, Reason: "exact_exception"}
 		} else if g.matchPublic(r) {
 			d = Decision{Allowed: true, Reason: "public_rule"}
+		} else if g.signer.verify(r) {
+			d = Decision{Allowed: true, Reason: "signed_exception"}
 		}
 	}
 
@@ -377,6 +381,7 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 			pr.Out.Host = pr.In.Host // Host は公開ドメインのまま渡す
 			pr.Out.Header.Del("Forwarded")
 			pr.Out.Header.Del("X-Real-Ip")
+			stripSignedHeaders(pr.Out.Header)
 			if ip, ok := clientIP(pr.In); ok {
 				pr.Out.Header.Set("X-Forwarded-For", ip.String())
 			} else {
@@ -412,6 +417,13 @@ func main() {
 	rules, err := parseRules(os.Getenv("GATE_PUBLIC_RULES"))
 	if err != nil {
 		log.Fatalf("GATE_PUBLIC_RULES: %v", err)
+	}
+
+	signer := newSigner(os.Getenv("GATE_SIGNED_SECRET"))
+	if signer != nil {
+		log.Printf("GATE_SIGNED_ENABLED")
+	} else {
+		log.Printf("GATE_SIGNED_DISABLED reason=no_secret")
 	}
 
 	db := DBConfig{
@@ -451,6 +463,7 @@ func main() {
 		healthPath:  getenv("GATE_HEALTH_PATH", "/gate/healthz"),
 		exactAllow:  parseExact(os.Getenv("GATE_EXACT_ALLOW")),
 		publicRules: rules,
+		signer:      signer,
 		redirectURL: getenv("GATE_REDIRECT_URL", "https://gate.jyrac.stki.org/"),
 		deniedURL:   getenv("GATE_DENIED_URL", "https://gate.jyrac.stki.org/denied"),
 		enforce:     enforce,

@@ -8,7 +8,7 @@ ENV GOTOOLCHAIN=auto \
     CGO_ENABLED=0
 ARG PGX_VERSION=v5.9.2
 WORKDIR /src
-COPY gate.go policy.go rules.go internal.go ./
+COPY gate.go policy.go rules.go internal.go signed.go ./
 RUN go mod init gate && \
     go get github.com/jackc/pgx/v5@${PGX_VERSION} && \
     go mod tidy && \
