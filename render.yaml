@@ -19,3 +19,20 @@ services:
         value: "casdoor"
       - key: OPENBAO_NB_ADDR
         value: "https://100.125.124.43:8210"
+      # ---- IPゲート（GATE_DB_USER / GATE_DB_PASSWORD は、Agent が出すので、ここには書かない）----
+      # GATE_CHILD_CMD / GATE_UPSTREAM / GATE_UPSTREAM_HEALTH_PATH / GATE_INTERNAL_* は、Dockerfile で設定済み
+      # 観察（observe）から始める。全クライアントが内部口に移ってから、enforce にする（C6）
+      - key: GATE_MODE
+        value: "observe"
+      - key: GATE_DB_HOST
+        value: "aws-0-us-west-2.pooler.supabase.com"
+      - key: GATE_DB_PORT
+        value: "6543"
+      - key: GATE_DB_NAME
+        value: "postgres"
+      - key: GATE_DB_SSLMODE
+        value: "require"
+      - key: GATE_DENIED_URL
+        value: "https://gate.jyrac.stki.org/denied"
+      - key: GATE_REDIRECT_URL
+        value: "https://gate.jyrac.stki.org/"

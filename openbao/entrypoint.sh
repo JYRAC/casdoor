@@ -76,6 +76,19 @@ fi
 
 printf '%s' "$REAL_TOKEN" > /tmp/vault-token
 
+# 内部口（NetBird 向け、TLS 1.3）の、証明書と秘密鍵（OpenBao から受け取る。unwrap と同じ経路を使う）。
+# 受け取れないときは、内部口だけが開かない（ゲートが、ログに GATE_INTERNAL_DISABLED を出す）。
+# 公開側の Casdoor は、そのまま動く。
+mkdir -p /tmp/tls
+BAO_TOKEN="$REAL_TOKEN" bao kv get -mount=kv -field=tls_cert_pem secrets/casdoor/config > /tmp/tls/cert.pem 2>/tmp/tls.err || true
+BAO_TOKEN="$REAL_TOKEN" bao kv get -mount=kv -field=tls_key_pem secrets/casdoor/config > /tmp/tls/key.pem 2>>/tmp/tls.err || true
+if [ -s /tmp/tls/cert.pem ] && [ -s /tmp/tls/key.pem ]; then
+  chmod 600 /tmp/tls/key.pem
+else
+  rm -f /tmp/tls/cert.pem /tmp/tls/key.pem
+  echo "OpenBao から tls_cert_pem / tls_key_pem を受け取れません。内部口は開きません: $(tail -n 2 /tmp/tls.err | tr '\n' ' ')" >&2
+fi
+
 # 固定のピアの設定を、OpenBao から受け取って、一時のピアから切り替える（unwrap と同じ経路を使う）。
 # 受け取れない、または、切り替えに失敗したときは、一時のピアのまま続ける（OpenBao には出られるが、
 # Casdoor は NetBird に出ない。C1 の段階では、利用者にも、他のアプリにも、影響しない）。

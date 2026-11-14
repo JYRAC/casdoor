@@ -13,8 +13,19 @@ env_template "dataSourceName" {
   contents = "{{ with secret \"database/creds/casdoor\" }}postgresql://{{ .Data.username }}.kuajmlczxracqobxkzee:{{ .Data.password }}@aws-0-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require&binary_parameters=yes{{ end }}"
 }
 
-# Casdoor は、`env -u` を通して起動する。Agent が OpenBao に出るための設定（SOCKS5 のプロキシ、
-# OpenBao 向けの BAO_*）を、Casdoor に渡さないため。渡すと、Casdoor の外向きの通信
+# ゲート専用の、読み取りだけのDB資格情報（Casdoor 本体のロールとは別）。
+# GATE_ で始まる環境変数は、ゲートが Casdoor の子プロセスには渡さない。
+env_template "GATE_DB_USER" {
+  contents = "{{ with secret \"database/creds/gate-reader\" }}{{ .Data.username }}.kuajmlczxracqobxkzee{{ end }}"
+}
+
+env_template "GATE_DB_PASSWORD" {
+  contents = "{{ with secret \"database/creds/gate-reader\" }}{{ .Data.password }}{{ end }}"
+}
+
+# Casdoor 本体（/server）は、ゲートが起動する（Dockerfile の GATE_CHILD_CMD）。
+# ゲートは、`env -u` を通して起動する。Agent が OpenBao に出るための設定（SOCKS5 のプロキシ、
+# OpenBao 向けの BAO_*）を、ゲートと Casdoor に渡さないため。渡すと、Casdoor の外向きの通信
 # （外部の IdP、ストレージ、メール、Webhook など）まで、NetBird の SOCKS5 に流れて、失敗する。
 exec {
   command = [
@@ -22,7 +33,7 @@ exec {
     "-u", "HTTPS_PROXY", "-u", "HTTP_PROXY", "-u", "NO_PROXY",
     "-u", "https_proxy", "-u", "http_proxy", "-u", "no_proxy",
     "-u", "BAO_ADDR", "-u", "BAO_CACERT", "-u", "BAO_TLS_SERVER_NAME", "-u", "BAO_CLIENT_TIMEOUT",
-    "/server"
+    "/app/gate"
   ]
   restart_on_secret_changes = "always"
 }

@@ -1,0 +1,53 @@
+name: Gate test
+
+# ゲート（Go）の、go vet と go test。ゲートのコードを変えたときだけ動く。
+# サードパーティの Action は使わない（他のワークフローと同じ）。
+
+on:
+  push:
+    paths:
+      - "*.go"
+      - ".github/workflows/gate-test.yml"
+  pull_request:
+    paths:
+      - "*.go"
+      - ".github/workflows/gate-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q src
+          cd src
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: go vet / go test
+        env:
+          GOTOOLCHAIN: auto
+          CGO_ENABLED: "1"   # -race に必要
+        run: |
+          set -eu
+          cd src
+          PGX=$(sed -n 's/^ARG PGX_VERSION=//p' Dockerfile)
+          test -n "$PGX"
+          # Dockerfile と同じ手順で、モジュールを作る（テストは、ゲートのソースだけを使う）
+          mkdir -p /tmp/gate && cp ./*.go /tmp/gate/
+          cd /tmp/gate
+          go mod init gate
+          go get "github.com/jackc/pgx/v5@${PGX}"
+          go mod tidy
+          test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+          go vet ./...
+          go test -race -count=1 ./...
