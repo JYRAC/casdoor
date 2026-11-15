@@ -23,7 +23,7 @@ RUN apk add --no-cache curl && \
     mkdir -p /tmp/netbird-bin && \
     tar -xzf /tmp/netbird.tar.gz -C /tmp/netbird-bin netbird
 
-FROM casbin/casdoor:v4.26.0
+FROM casbin/casdoor:v4.27.1
 COPY conf/app.conf /conf/app.conf
 
 ARG BAO_VERSION=2.7.2
