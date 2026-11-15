@@ -38,6 +38,12 @@ jobs:
           echo "days=$DAYS" >> "$GITHUB_OUTPUT"
           echo "source=${SRC:-unknown}" >> "$GITHUB_OUTPUT"
 
+          # PKI から発行できず、KV の自己署名に戻っているときは、期限の残りが多くても、毎回、警告を出す。
+          # （クライアントが、ルートだけを信頼する段階（C4 以降）では、この状態だと、内部口を検証できずに、ログインが止まる）
+          if [ "$CODE" = "200" ] && [ -n "$SRC" ] && [ "$SRC" != "pki" ]; then
+            echo "::warning::internal cert source=${SRC} (PKI の発行に失敗して、KV の自己署名に戻っています。デプロイのログの TLS_CERT_SOURCE を確認)"
+          fi
+
       - name: Trigger redeploy if unhealthy or the internal cert is expiring
         if: steps.check.outputs.code == '503' || steps.check.outputs.code == '000' || steps.check.outputs.renew == 'true'
         env:
