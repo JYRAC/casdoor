@@ -25,9 +25,12 @@ services:
         value: "https://100.125.124.43:8210"
       # ---- IPゲート（GATE_DB_USER / GATE_DB_PASSWORD は、Agent が出すので、ここには書かない）----
       # GATE_CHILD_CMD / GATE_UPSTREAM / GATE_UPSTREAM_HEALTH_PATH / GATE_INTERNAL_* は、Dockerfile で設定済み
-      # 観察（observe）から始める。全クライアントが内部口に移ってから、enforce にする（C6）
+      # C6: enforce(全クライアントが内部口に移ったので、公開側は、許可リストの IP と、Worker の署名つきの例外だけ)。
+      # 戻すとき(enforce → observe): Render のダッシュボードで GATE_MODE=observe にして、deploy-secrets.yml を実行する
+      # (Render の再起動は、使用済みの一回限りの資格情報を再利用して失敗するので、必ず、deploy-secrets.yml で入れ直す)。
+      # すぐに開けたいとき: Supabase の gate.allow_cidrs に、期限つきで 0.0.0.0/0 と ::/0 を入れる(30 秒ほどで反映)。
       - key: GATE_MODE
-        value: "observe"
+        value: "enforce"
       - key: GATE_DB_HOST
         value: "aws-0-us-west-2.pooler.supabase.com"
       - key: GATE_DB_PORT
