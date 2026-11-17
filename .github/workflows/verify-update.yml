@@ -71,7 +71,7 @@ jobs:
           # --- 2. 候補を古い順に調べて、進めてよい最初の1件を選ぶ(待ち・不適合の候補は飛ばして次へ) ---
           ERRS=0
           check_candidate() { # PR番号 -> 0: 進める / 1: 飛ばす
-            local n="$1" PRJ AUTHOR HEADREPO BAD NEWVER PREV_VER PREV_DATE AGE_H BEHIND BK BK_DATE BK_AGE_MIN
+            local n="$1" PRJ AUTHOR HEADREPO BAD NEWVER GATED ARGNAME PREV_VER PREV_DATE AGE_H BEHIND BK BK_DATE BK_AGE_MIN
             PRJ=$(gh_api "$API/repos/$REPO/pulls/$n") || { echo "::error::cannot read PR #$n"; ERRS=$((ERRS+1)); return 1; }
             AUTHOR=$(jq -r .user.login <<<"$PRJ")
             HEAD=$(jq -r .head.sha <<<"$PRJ")
@@ -80,7 +80,7 @@ jobs:
             echo "candidate: #$n $TITLE ($HEAD)"
             echo "- candidate #$n: $TITLE" >> "$GITHUB_STEP_SUMMARY"
 
-            # 安全確認: Renovate本人の、同一リポジトリのブランチで、Dockerfileの FROM / ARG BAO_VERSION 行だけの変更
+            # 安全確認: Renovate本人の、同一リポジトリのブランチで、Dockerfileの FROM / ARG BAO_VERSION / ARG NETBIRD_VERSION 行だけの変更
             if [ "$AUTHOR" != "renovate[bot]" ] || [ "$HEADREPO" != "$REPO" ]; then
               echo "::error::PR #$n is not from renovate[bot] in this repo; refusing"; ERRS=$((ERRS+1)); return 1
             fi
@@ -90,9 +90,9 @@ jobs:
             fi
             BAD=$(jq -r '.[0].patch // ""' <<<"$FILES" \
               | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-              | grep -vE '^[+-](FROM |ARG BAO_VERSION=)' || true)
+              | grep -vE '^[+-](FROM |ARG BAO_VERSION=|ARG NETBIRD_VERSION=)' || true)
             if [ -n "$BAD" ]; then
-              echo "::error::PR #$n changes lines other than FROM / ARG BAO_VERSION; refusing"; ERRS=$((ERRS+1)); return 1
+              echo "::error::PR #$n changes lines other than FROM / ARG BAO_VERSION / ARG NETBIRD_VERSION; refusing"; ERRS=$((ERRS+1)); return 1
             fi
 
             # mainに追いついているか(古い土台のままデプロイしない。追いついていなければ、Renovateのrebaseを待つ)
@@ -102,26 +102,30 @@ jobs:
               echo "- #$n waiting: behind main by ${BEHIND:-?}" >> "$GITHUB_STEP_SUMMARY"; return 1
             fi
 
-            # 段階づけ(BAO_VERSIONの更新だけ): 前段のリポジトリが同じ版で十分な時間動いているときだけ進む
-            NEWVER=$(jq -r '.[0].patch' <<<"$FILES" | grep -E '^\+ARG BAO_VERSION=' | head -1 | sed 's/^+ARG BAO_VERSION=//') || true
-            if [ -n "$NEWVER" ]; then
+            # 段階づけ(ARG BAO_VERSION / ARG NETBIRD_VERSION の更新): 前段のリポジトリが同じ版で十分な時間動いているときだけ進む
+            GATED=0
+            PREV_DATE=$(gh_api "$API/repos/JYRAC/$PREV_REPO/commits?path=Dockerfile&per_page=1" \
+              | jq -r '.[0].commit.committer.date // empty') || PREV_DATE=""
+            for ARGNAME in BAO_VERSION NETBIRD_VERSION; do
+              NEWVER=$(jq -r '.[0].patch' <<<"$FILES" | grep -E "^\+ARG ${ARGNAME}=" | head -1 | sed "s/^+ARG ${ARGNAME}=//") || true
+              [ -n "$NEWVER" ] || continue
+              GATED=1
               PREV_VER=$(gh_api "$API/repos/JYRAC/$PREV_REPO/contents/Dockerfile?ref=main" \
-                | jq -r .content | base64 -d | grep -E '^ARG BAO_VERSION=' | head -1 | sed 's/^ARG BAO_VERSION=//') || true
-              PREV_DATE=$(gh_api "$API/repos/JYRAC/$PREV_REPO/commits?path=Dockerfile&per_page=1" \
-                | jq -r '.[0].commit.committer.date // empty') || PREV_DATE=""
+                | jq -r .content | base64 -d | grep -E "^ARG ${ARGNAME}=" | head -1 | sed "s/^ARG ${ARGNAME}=//") || true
               if [ -z "$PREV_DATE" ]; then
                 echo "waiting: cannot read the history of $PREV_REPO"; return 1
               fi
               AGE_H=$(( ( $(date +%s) - $(date -d "$PREV_DATE" +%s) ) / 3600 ))
-              echo "gate: $PREV_REPO is on ${PREV_VER:-unknown} (Dockerfile last changed ${AGE_H}h ago); candidate wants $NEWVER"
-              echo "- #$n gate: $PREV_REPO=${PREV_VER:-unknown}, age=${AGE_H}h, candidate=$NEWVER" >> "$GITHUB_STEP_SUMMARY"
+              echo "gate($ARGNAME): $PREV_REPO is on ${PREV_VER:-unknown} (Dockerfile last changed ${AGE_H}h ago); candidate wants $NEWVER"
+              echo "- #$n gate($ARGNAME): $PREV_REPO=${PREV_VER:-unknown}, age=${AGE_H}h, candidate=$NEWVER" >> "$GITHUB_STEP_SUMMARY"
               if [ "$PREV_VER" != "$NEWVER" ]; then
                 echo "waiting: $PREV_REPO is not on $NEWVER yet"; return 1
               fi
               if [ "$AGE_H" -lt "$MIN_AGE_HOURS" ]; then
                 echo "waiting: $PREV_REPO changed only ${AGE_H}h ago (< ${MIN_AGE_HOURS}h)"; return 1
               fi
-            else
+            done
+            if [ "$GATED" = 0 ]; then
               echo "gate: FROM update (not gated by the chain)"
             fi
 

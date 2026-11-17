@@ -28,6 +28,18 @@
       "depNameTemplate": "openbao/openbao",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG NETBIRD_VERSION=(?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "netbirdio/netbird",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     }
   ],
   "packageRules": [
@@ -40,6 +52,16 @@
     {
       "matchDepNames": [
         "openbao/openbao"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "matchDepNames": [
+        "netbirdio/netbird"
       ],
       "matchUpdateTypes": [
         "minor",
