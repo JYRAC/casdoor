@@ -112,8 +112,66 @@ var internalARules = []internalRule{
 	exactNoQuery(http.MethodGet, "/api/userinfo"),
 }
 
-// 内部口 B: 管理 API。sync-client-secrets.yml が呼ぶ 2 つだけ（Actions だけが、NetBird の ACL で届く）。
+// casdoor-sync(Google Workspace → Casdoor のユーザーとグループの同期)の対象の組織。
+const syncOrg = "JYRAC"
+
+var (
+	// 同期するユーザーとグループの id(JYRAC/<Name>)。Name は、メールのローカル部(英数字で始まり、英数字、. _ - が続く)
+	reSyncID = regexp.MustCompile(`^JYRAC/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	reDigits = regexp.MustCompile(`^[0-9]{1,6}$`)
+	// update-user の columns(列名のカンマ区切り)
+	reColumns = regexp.MustCompile(`^[a-z_]{1,40}(,[a-z_]{1,40}){0,19}$`)
+)
+
+// syncListQuery: メソッドとパスが完全一致で、クエリは owner=JYRAC、p、pageSize の 3 つだけ。
+func syncListQuery(method, p string) internalRule {
+	return func(r *http.Request) bool {
+		if r.Method != method || r.URL.Path != p {
+			return false
+		}
+		q, ok := parseStrictQuery(r)
+		return ok && len(q) == 3 && q.Get("owner") == syncOrg &&
+			reDigits.MatchString(q.Get("p")) && reDigits.MatchString(q.Get("pageSize"))
+	}
+}
+
+// syncIDQuery: メソッドとパスが完全一致で、クエリは id=JYRAC/<Name>。withColumns のときだけ、columns を足してよい。
+func syncIDQuery(method, p string, withColumns bool) internalRule {
+	return func(r *http.Request) bool {
+		if r.Method != method || r.URL.Path != p {
+			return false
+		}
+		q, ok := parseStrictQuery(r)
+		if !ok || !reSyncID.MatchString(q.Get("id")) {
+			return false
+		}
+		switch len(q) {
+		case 1:
+			return true
+		case 2:
+			return withColumns && reColumns.MatchString(q.Get("columns"))
+		default:
+			return false
+		}
+	}
+}
+
+// 内部口 B: 管理 API。Actions だけが、NetBird の ACL で届く。
+//
+//	sync-client-secrets.yml:  管理者の組織(admin)のアプリの、get-application と update-application。
+//	casdoor-sync:             組織 JYRAC の、ユーザーとグループの、一覧、追加、更新だけ(削除は、通さない)。
+//
+// 通すのは、パスとクエリが完全一致のものだけ。本文は、見ない(各 API の認証で守る。Basic 認証の、アプリの資格情報)。
 var internalBRules = []internalRule{
 	adminAppQuery(http.MethodGet, "/api/get-application"),
 	adminAppQuery(http.MethodPost, "/api/update-application"),
+
+	// casdoor-sync
+	exactNoQuery(http.MethodGet, "/api/health"),
+	syncListQuery(http.MethodGet, "/api/get-users"),
+	syncListQuery(http.MethodGet, "/api/get-groups"),
+	exactNoQuery(http.MethodPost, "/api/add-user"),
+	exactNoQuery(http.MethodPost, "/api/add-group"),
+	syncIDQuery(http.MethodPost, "/api/update-user", true),
+	syncIDQuery(http.MethodPost, "/api/update-group", false),
 }
