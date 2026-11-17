@@ -9,7 +9,10 @@ package main
 // 管理者アプリの資格情報）で行う。ここでは、通すパスを、必要最小限に絞る。
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -112,16 +115,109 @@ var internalARules = []internalRule{
 	exactNoQuery(http.MethodGet, "/api/userinfo"),
 }
 
-// casdoor-sync(Google Workspace → Casdoor のユーザーとグループの同期)の対象の組織。
+// ---- casdoor-sync(Google Workspace → Casdoor のユーザーとグループの同期)----
+//
+// casdoor-sync は、sync-client-secrets.yml と同じ管理者アプリの資格情報(admin-client)で呼ぶ。
+// この資格情報は、Casdoor の認可では、全組織に届く。そこで、ゲートで、組織 JYRAC の、同期に必要な操作だけに絞る。
+//   - 通すのは、パスとクエリが完全一致のものだけ(削除は、通さない)
+//   - 書き込みは、本文も見る: owner が JYRAC、name が正しい書式、管理者の権限(isAdmin、isGlobalAdmin)を付けない、
+//     所属先のグループ(groups)は JYRAC のものだけ
+//   - update-user は、columns が必須で、同期が書く列だけ(owner、is_admin などは、書けない)
+
 const syncOrg = "JYRAC"
 
 var (
-	// 同期するユーザーとグループの id(JYRAC/<Name>)。Name は、メールのローカル部(英数字で始まり、英数字、. _ - が続く)
-	reSyncID = regexp.MustCompile(`^JYRAC/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-	reDigits = regexp.MustCompile(`^[0-9]{1,6}$`)
-	// update-user の columns(列名のカンマ区切り)
-	reColumns = regexp.MustCompile(`^[a-z_]{1,40}(,[a-z_]{1,40}){0,19}$`)
+	reSyncName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	reSyncID   = regexp.MustCompile(`^JYRAC/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	reDigits   = regexp.MustCompile(`^[0-9]{1,6}$`)
 )
+
+// 同期が、update-user で書く列。ここにないものは、書けない。
+var syncUserColumns = map[string]bool{
+	"email": true, "display_name": true, "is_forbidden": true, "properties": true, "groups": true,
+}
+
+const syncMaxBody = 1 << 20
+
+// bodyJSON は、本文(1 MiB まで)を読み、JSON のオブジェクトとして返す。読んだあとは、本文を元に戻す。
+func bodyJSON(r *http.Request) (map[string]any, bool) {
+	if r.Body == nil {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, syncMaxBody+1))
+	if err != nil || len(b) > syncMaxBody {
+		return nil, false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(b))
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// groupsInOrg は、groups が、JYRAC のグループの id(JYRAC/<name>)の配列であること。
+func groupsInOrg(v any) bool {
+	if v == nil {
+		return true
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	for _, x := range arr {
+		s, ok := x.(string)
+		if !ok || !reSyncID.MatchString(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// syncBodyOK は、本文が、組織 JYRAC の、管理者でないオブジェクトであること。
+// Casdoor の JSON の読み取りは、キーの大文字小文字を区別しないので、ここも区別しない(同名のキーが複数あれば、すべてを検査する)。
+// idName が空でなければ、name は、それと一致すること。
+func syncBodyOK(body map[string]any, idName string, user bool) bool {
+	ownerSeen, nameSeen := false, false
+	for k, v := range body {
+		switch {
+		case strings.EqualFold(k, "owner"):
+			s, ok := v.(string)
+			if !ok || s != syncOrg {
+				return false
+			}
+			ownerSeen = true
+		case strings.EqualFold(k, "name"):
+			s, ok := v.(string)
+			if !ok || !reSyncName.MatchString(s) || (idName != "" && s != idName) {
+				return false
+			}
+			nameSeen = true
+		case user && (strings.EqualFold(k, "isAdmin") || strings.EqualFold(k, "isGlobalAdmin")):
+			if b, ok := v.(bool); !ok || b {
+				return false
+			}
+		case user && strings.EqualFold(k, "groups"):
+			if !groupsInOrg(v) {
+				return false
+			}
+		}
+	}
+	return ownerSeen && nameSeen
+}
+
+// syncColumnsOK は、columns が、同期が書く列だけであること(空は、不可: 空だと、全列を更新する)。
+func syncColumnsOK(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range strings.Split(s, ",") {
+		if !syncUserColumns[c] {
+			return false
+		}
+	}
+	return true
+}
 
 // syncListQuery: メソッドとパスが完全一致で、クエリは owner=JYRAC、p、pageSize の 3 つだけ。
 func syncListQuery(method, p string) internalRule {
@@ -135,24 +231,36 @@ func syncListQuery(method, p string) internalRule {
 	}
 }
 
-// syncIDQuery: メソッドとパスが完全一致で、クエリは id=JYRAC/<Name>。withColumns のときだけ、columns を足してよい。
-func syncIDQuery(method, p string, withColumns bool) internalRule {
+// syncAdd: 追加。クエリは無し。本文を検査する。
+func syncAdd(p string, user bool) internalRule {
 	return func(r *http.Request) bool {
-		if r.Method != method || r.URL.Path != p {
+		if r.Method != http.MethodPost || r.URL.Path != p || r.URL.RawQuery != "" {
+			return false
+		}
+		body, ok := bodyJSON(r)
+		return ok && syncBodyOK(body, "", user)
+	}
+}
+
+// syncUpdate: 更新。クエリは id=JYRAC/<name>(update-user は、これに columns が必須)。本文を検査する。
+func syncUpdate(p string, user bool) internalRule {
+	return func(r *http.Request) bool {
+		if r.Method != http.MethodPost || r.URL.Path != p {
 			return false
 		}
 		q, ok := parseStrictQuery(r)
 		if !ok || !reSyncID.MatchString(q.Get("id")) {
 			return false
 		}
-		switch len(q) {
-		case 1:
-			return true
-		case 2:
-			return withColumns && reColumns.MatchString(q.Get("columns"))
-		default:
+		if user {
+			if len(q) != 2 || !syncColumnsOK(q.Get("columns")) {
+				return false
+			}
+		} else if len(q) != 1 {
 			return false
 		}
+		body, ok := bodyJSON(r)
+		return ok && syncBodyOK(body, strings.TrimPrefix(q.Get("id"), syncOrg+"/"), user)
 	}
 }
 
@@ -161,7 +269,7 @@ func syncIDQuery(method, p string, withColumns bool) internalRule {
 //	sync-client-secrets.yml:  管理者の組織(admin)のアプリの、get-application と update-application。
 //	casdoor-sync:             組織 JYRAC の、ユーザーとグループの、一覧、追加、更新だけ(削除は、通さない)。
 //
-// 通すのは、パスとクエリが完全一致のものだけ。本文は、見ない(各 API の認証で守る。Basic 認証の、アプリの資格情報)。
+// 通すのは、パスとクエリが完全一致のものだけ。casdoor-sync の書き込みは、本文も検査する(上)。
 var internalBRules = []internalRule{
 	adminAppQuery(http.MethodGet, "/api/get-application"),
 	adminAppQuery(http.MethodPost, "/api/update-application"),
@@ -170,8 +278,8 @@ var internalBRules = []internalRule{
 	exactNoQuery(http.MethodGet, "/api/health"),
 	syncListQuery(http.MethodGet, "/api/get-users"),
 	syncListQuery(http.MethodGet, "/api/get-groups"),
-	exactNoQuery(http.MethodPost, "/api/add-user"),
-	exactNoQuery(http.MethodPost, "/api/add-group"),
-	syncIDQuery(http.MethodPost, "/api/update-user", true),
-	syncIDQuery(http.MethodPost, "/api/update-group", false),
+	syncAdd("/api/add-user", true),
+	syncAdd("/api/add-group", false),
+	syncUpdate("/api/update-user", true),
+	syncUpdate("/api/update-group", false),
 }
