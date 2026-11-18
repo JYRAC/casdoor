@@ -79,10 +79,7 @@
       "matchDepNames": [
         "casbin/casdoor"
       ],
-      "minimumReleaseAge": "3 days",
-      "schedule": [
-        "before 5am on monday"
-      ]
+      "enabled": false
     }
   ],
   "rebaseWhen": "behind-base-branch"
