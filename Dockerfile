@@ -23,7 +23,9 @@ RUN apk add --no-cache curl && \
     mkdir -p /tmp/netbird-bin && \
     tar -xzf /tmp/netbird.tar.gz -C /tmp/netbird-bin netbird
 
-FROM casbin/casdoor:v4.27.1
+# v4.27.0 以降は RBAC に商用ライセンスが必要になりログインできなくなるため、v4.26.0 に固定する（casbin/casdoor#6077）。
+# Renovate の更新も renovate.json で止めている。
+FROM casbin/casdoor:v4.26.0
 COPY conf/app.conf /conf/app.conf
 
 ARG BAO_VERSION=2.7.2
