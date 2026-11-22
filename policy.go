@@ -164,36 +164,75 @@ func queryCIDRs(ctx context.Context, conn *pgx.Conn, q string, isAllow bool) ([]
 	return out, rows.Err()
 }
 
-// Load は、短命の接続を1本開いて、3つのビューを読む。毎回つなぎ直す
-// （トランザクションモードのプーラー越しに、接続を持ち続けないため）。
-func (c DBConfig) Load(ctx context.Context) (*Policy, IngestHealth, error) {
-	cfg, err := c.connConfig()
+// loader は、接続を1本使い回して、3つのビューを読む。
+// 以前は30秒ごとにつなぎ直していたが、そのたびに TLS と認証のやり取りが Supavisor から出て、
+// Egress を消費していた。Supavisor のトランザクションモードでは、クライアント接続を持ち続けても
+// DB側の接続は占有しない。エラー時と、maxAge を過ぎたときだけつなぎ直す。
+// 資格情報が入れ替わるときは、Agent がゲートごと再起動するので、古い資格情報を握り続けることはない。
+const connMaxAge = 30 * time.Minute
+
+type loader struct {
+	cfg      DBConfig
+	conn     *pgx.Conn
+	openedAt time.Time
+}
+
+func (l *loader) closeConn() {
+	if l.conn == nil {
+		return
+	}
+	// 相手が応答しなくても、ここで止まらないように、時間を区切る
+	cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = l.conn.Close(cctx)
+	cancel()
+	l.conn = nil
+}
+
+func (l *loader) ensure(ctx context.Context) error {
+	if l.conn != nil && (l.conn.IsClosed() || time.Since(l.openedAt) > connMaxAge) {
+		l.closeConn()
+	}
+	if l.conn != nil {
+		return nil
+	}
+	cfg, err := l.cfg.connConfig()
 	if err != nil {
-		return nil, IngestHealth{}, err
+		return err
 	}
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
-		return nil, IngestHealth{}, fmt.Errorf("connect: %w", err)
+		return fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(context.Background())
+	l.conn, l.openedAt = conn, time.Now()
+	return nil
+}
 
-	allow, err := queryCIDRs(ctx, conn, "select cidr::text, expires_at from gate.allow_cidrs", true)
+func (l *loader) Load(ctx context.Context) (*Policy, IngestHealth, error) {
+	if err := l.ensure(ctx); err != nil {
+		return nil, IngestHealth{}, err
+	}
+	allow, err := queryCIDRs(ctx, l.conn, "select cidr::text, expires_at from gate.allow_cidrs", true)
 	if err != nil {
+		l.closeConn()
 		return nil, IngestHealth{}, fmt.Errorf("allow_cidrs: %w", err)
 	}
-	deny, err := queryCIDRs(ctx, conn, "select cidr::text, expires_at from gate.deny_cidrs", false)
+	deny, err := queryCIDRs(ctx, l.conn, "select cidr::text, expires_at from gate.deny_cidrs", false)
 	if err != nil {
+		l.closeConn()
 		return nil, IngestHealth{}, fmt.Errorf("deny_cidrs: %w", err)
 	}
 
 	var h IngestHealth
 	var ok *bool
 	var ia, ua *float64
-	err = conn.QueryRow(ctx,
+	err = l.conn.QueryRow(ctx,
 		"select ok, ingest_age_s::float8, users_age_s::float8 from gate.ingest_health limit 1",
 	).Scan(&ok, &ia, &ua)
 	if err != nil {
 		h.Err = err
+		if l.conn.IsClosed() {
+			l.conn = nil
+		}
 	} else {
 		h = IngestHealth{Known: true, OK: ok != nil && *ok, IngestAgeS: ia, UsersAgeS: ua}
 	}
@@ -240,10 +279,12 @@ func (s *Store) Run(ctx context.Context, c DBConfig, interval time.Duration) {
 	)
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	ld := &loader{cfg: c}
+	defer ld.closeConn()
 
 	for {
 		lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		p, h, err := c.Load(lctx)
+		p, h, err := ld.Load(lctx)
 		cancel()
 		now := time.Now()
 
