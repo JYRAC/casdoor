@@ -28,7 +28,7 @@ RUN apk add --no-cache curl && \
 FROM casbin/casdoor:v4.26.0
 COPY conf/app.conf /conf/app.conf
 
-ARG BAO_VERSION=2.7.2
+ARG BAO_VERSION=2.7.3
 USER root
 RUN curl -fsSL -o /tmp/bao.tar.gz \
       "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/openbao_${BAO_VERSION}_linux_amd64.tar.gz" && \
